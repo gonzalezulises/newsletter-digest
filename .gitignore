@@ -1,0 +1,30 @@
+# Credenciales y secrets
+.env
+credentials.json
+token.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Output
+*.json
+cron.log
+digest_error.txt
+digest_*.md
+*.md.bak
+
+# Scripts obsoletos (LM Studio)
+start_lmstudio.scpt
+process_all.py
+process_range.py
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
