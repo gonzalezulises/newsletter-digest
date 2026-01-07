@@ -1,0 +1,67 @@
+name: Daily Newsletter Digest
+
+on:
+  schedule:
+    # Ejecutar diariamente a las 6pm EST (23:00 UTC)
+    - cron: '0 23 * * *'
+  workflow_dispatch:
+    # Permite ejecución manual desde GitHub UI
+    inputs:
+      days:
+        description: 'Days to look back'
+        required: false
+        default: '7'
+      max:
+        description: 'Max newsletters to process'
+        required: false
+        default: '50'
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create credentials files
+        env:
+          GMAIL_CREDENTIALS: ${{ secrets.GMAIL_CREDENTIALS }}
+          GMAIL_TOKEN: ${{ secrets.GMAIL_TOKEN }}
+        run: |
+          echo "$GMAIL_CREDENTIALS" | base64 -d > credentials.json
+          echo "$GMAIL_TOKEN" | base64 -d > token.json
+
+      - name: Create .env file
+        run: |
+          cat > .env << EOF
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          GMAIL_LABEL=data_science
+          DAYS_BACK=${{ github.event.inputs.days || '7' }}
+          NOTION_TOKEN=${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID=${{ secrets.NOTION_DATABASE_ID }}
+          EOF
+
+      - name: Run newsletter digest
+        run: |
+          python digest.py \
+            --label "data_science" \
+            --days ${{ github.event.inputs.days || '7' }} \
+            --max ${{ github.event.inputs.max || '50' }}
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digest-${{ github.run_number }}
+          path: digest_*.json
+          retention-days: 7
