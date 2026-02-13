@@ -4,6 +4,7 @@ Usa App Password en lugar de OAuth2 — no expira.
 """
 
 import email
+import email.message
 import imaplib
 import os
 from datetime import datetime, timedelta
