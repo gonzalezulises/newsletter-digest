@@ -34,7 +34,7 @@ python digest.py --days 7
 | Archivo | Función |
 |---------|---------|
 | `digest.py` | CLI principal |
-| `gmail_client.py` | Conexión Gmail API |
+| `gmail_client.py` | Conexión Gmail IMAP (App Password) |
 | `summarizer.py` | Clasificación con Groq (batches) |
 | `notion_client.py` | Envío a Notion |
 | `run_daily.sh` | Script para cron |
@@ -62,7 +62,7 @@ tail -f cron.log
 ## Dependencias Clave
 
 - `groq` - Cliente API de Groq
-- `google-auth-oauthlib` - OAuth para Gmail
+- `imaplib` (stdlib) - IMAP para Gmail con App Password
 - `notion-client` - Cliente API de Notion
 
 No agregar alternativas (OpenAI, Anthropic, etc.) sin justificación.
@@ -81,7 +81,7 @@ El script procesa en batches de 10 newsletters con 65 segundos de pausa entre ca
 
 | Problema | Solución |
 |----------|----------|
-| Token Gmail expirado | `rm token.json` + re-ejecutar |
+| Error IMAP login | Verificar GMAIL_EMAIL y GMAIL_APP_PASSWORD en secrets |
 | Rate limit Groq | Esperar 1 minuto, script maneja automático |
 | Duplicados en Notion | Script de limpieza en historial de chat |
 

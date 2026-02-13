@@ -106,7 +106,7 @@ def main():
     print("🔐 Conectando a Gmail...")
     try:
         gmail = GmailClient().authenticate()
-    except FileNotFoundError as e:
+    except (ValueError, Exception) as e:
         print(f"\nError: {e}")
         sys.exit(1)
 

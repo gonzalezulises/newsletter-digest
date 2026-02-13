@@ -1,69 +1,46 @@
 """
-Módulo para conectarse a Gmail y extraer newsletters.
+Módulo para conectarse a Gmail vía IMAP y extraer newsletters.
+Usa App Password en lugar de OAuth2 — no expira.
 """
 
+import email
+import imaplib
 import os
-import base64
 from datetime import datetime, timedelta
+from email.header import decode_header
 from email.utils import parsedate_to_datetime
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-
+from dotenv import load_dotenv
 import html2text
 
-# Permisos necesarios (solo lectura)
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+load_dotenv()
+
+IMAP_SERVER = "imap.gmail.com"
+IMAP_PORT = 993
+
 
 class GmailClient:
     def __init__(self):
-        self.service = None
+        self.mail = None
         self.h2t = html2text.HTML2Text()
         self.h2t.ignore_links = False
         self.h2t.ignore_images = True
         self.h2t.body_width = 0
 
     def authenticate(self):
-        """Autenticarse con Gmail usando OAuth2."""
-        creds = None
+        """Conectar a Gmail vía IMAP con App Password."""
+        email_addr = os.getenv("GMAIL_EMAIL")
+        app_password = os.getenv("GMAIL_APP_PASSWORD")
 
-        # Token guardado de sesiones anteriores
-        if os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        if not email_addr or not app_password:
+            raise ValueError(
+                "GMAIL_EMAIL y GMAIL_APP_PASSWORD deben estar configurados.\n"
+                "Genera un App Password en: https://myaccount.google.com/apppasswords"
+            )
 
-        # Si no hay credenciales válidas, iniciar flujo de autenticación
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not os.path.exists('credentials.json'):
-                    raise FileNotFoundError(
-                        "No se encontró 'credentials.json'. "
-                        "Descárgalo desde Google Cloud Console."
-                    )
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    'credentials.json', SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-
-            # Guardar credenciales para la próxima vez
-            with open('token.json', 'w') as token:
-                token.write(creds.to_json())
-
-        self.service = build('gmail', 'v1', credentials=creds)
+        self.mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+        self.mail.login(email_addr, app_password)
         return self
-
-    def get_label_id(self, label_name: str) -> str | None:
-        """Obtener el ID de un label por su nombre."""
-        results = self.service.users().labels().list(userId='me').execute()
-        labels = results.get('labels', [])
-
-        for label in labels:
-            if label['name'].lower() == label_name.lower():
-                return label['id']
-        return None
 
     def get_newsletters(self, label_name: str, days_back: int = 7) -> list[dict]:
         """
@@ -76,132 +53,159 @@ class GmailClient:
         Returns:
             Lista de diccionarios con subject, from, date, body
         """
-        label_id = self.get_label_id(label_name)
-        if not label_id:
+        # Seleccionar la carpeta/label
+        status, _ = self.mail.select(f'"{label_name}"', readonly=True)
+        if status != "OK":
             raise ValueError(f"Label '{label_name}' no encontrado en Gmail")
 
-        # Calcular fecha límite
-        after_date = datetime.now() - timedelta(days=days_back)
-        query = f"after:{after_date.strftime('%Y/%m/%d')}"
+        # Buscar mensajes desde la fecha límite
+        since_date = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
+        status, data = self.mail.search(None, f'(SINCE {since_date})')
+        if status != "OK" or not data[0]:
+            return []
 
-        # Buscar mensajes
-        results = self.service.users().messages().list(
-            userId='me',
-            labelIds=[label_id],
-            q=query,
-            maxResults=200
-        ).execute()
-
-        messages = results.get('messages', [])
+        msg_ids = data[0].split()
         newsletters = []
 
-        for msg in messages:
-            newsletter = self._parse_message(msg['id'])
+        for msg_id in msg_ids:
+            newsletter = self._parse_message(msg_id)
             if newsletter:
                 newsletters.append(newsletter)
 
         # Ordenar por fecha (más reciente primero)
-        newsletters.sort(key=lambda x: x['date'], reverse=True)
+        newsletters.sort(key=lambda x: x["date"], reverse=True)
         return newsletters
 
-    def _parse_message(self, msg_id: str) -> dict | None:
-        """Parsear un mensaje de Gmail."""
+    def _decode_header_value(self, value: str) -> str:
+        """Decodificar un header que puede tener encoding MIME."""
+        decoded_parts = decode_header(value)
+        result = []
+        for part, charset in decoded_parts:
+            if isinstance(part, bytes):
+                result.append(part.decode(charset or "utf-8", errors="replace"))
+            else:
+                result.append(part)
+        return "".join(result)
+
+    def _parse_message(self, msg_id: bytes) -> dict | None:
+        """Parsear un mensaje IMAP."""
         try:
-            message = self.service.users().messages().get(
-                userId='me',
-                id=msg_id,
-                format='full'
-            ).execute()
+            # Obtener el mensaje completo y el X-GM-MSGID para el link
+            status, data = self.mail.fetch(msg_id, "(RFC822 X-GM-MSGID)")
+            if status != "OK":
+                return None
 
-            headers = message['payload']['headers']
+            # Extraer Gmail message ID del response
+            gmail_id = None
+            for part in data:
+                if isinstance(part, tuple) and b"X-GM-MSGID" in part[0]:
+                    # El formato es: b'1 (X-GM-MSGID 1234567890 RFC822 {size}'
+                    token = part[0].decode()
+                    for segment in token.split():
+                        if segment.isdigit() and len(segment) > 10:
+                            gmail_id = format(int(segment), "x")
+                            break
 
-            # Extraer headers
-            subject = next(
-                (h['value'] for h in headers if h['name'].lower() == 'subject'),
-                'Sin asunto'
-            )
-            sender = next(
-                (h['value'] for h in headers if h['name'].lower() == 'from'),
-                'Desconocido'
-            )
-            date_str = next(
-                (h['value'] for h in headers if h['name'].lower() == 'date'),
-                None
-            )
+            # Parsear el email
+            raw_email = None
+            for part in data:
+                if isinstance(part, tuple) and len(part) == 2 and isinstance(part[1], bytes):
+                    raw_email = part[1]
+                    break
 
-            # Parsear fecha
+            if raw_email is None:
+                return None
+
+            msg = email.message_from_bytes(raw_email)
+
+            subject = self._decode_header_value(msg.get("Subject", "Sin asunto"))
+            sender = self._decode_header_value(msg.get("From", "Desconocido"))
+            date_str = msg.get("Date")
+
             date = datetime.now()
             if date_str:
                 try:
                     date = parsedate_to_datetime(date_str)
-                except:
+                except Exception:
                     pass
 
-            # Extraer cuerpo del mensaje
-            body = self._extract_body(message['payload'])
+            body = self._extract_body(msg)
 
             return {
-                'id': msg_id,
-                'subject': subject,
-                'from': sender,
-                'date': date,
-                'body': body[:15000]  # Limitar tamaño
+                "id": gmail_id or msg_id.decode(),
+                "subject": subject,
+                "from": sender,
+                "date": date,
+                "body": body[:15000],
             }
         except Exception as e:
             print(f"Error parseando mensaje {msg_id}: {e}")
             return None
 
-    def _extract_body(self, payload: dict) -> str:
+    def _extract_body(self, msg: email.message.Message) -> str:
         """Extraer el cuerpo del mensaje (preferir HTML, convertir a texto)."""
-        body = ""
+        html_body = None
+        text_body = None
 
-        if 'body' in payload and payload['body'].get('data'):
-            body = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8')
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                content_disposition = str(part.get("Content-Disposition", ""))
 
-        if 'parts' in payload:
-            html_body = None
-            text_body = None
+                # Saltar adjuntos
+                if "attachment" in content_disposition:
+                    continue
 
-            for part in payload['parts']:
-                mime_type = part.get('mimeType', '')
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload is None:
+                        continue
+                    charset = part.get_content_charset() or "utf-8"
+                    text = payload.decode(charset, errors="replace")
+                except Exception:
+                    continue
 
-                if mime_type == 'text/html' and part['body'].get('data'):
-                    html_body = base64.urlsafe_b64decode(
-                        part['body']['data']
-                    ).decode('utf-8')
-                elif mime_type == 'text/plain' and part['body'].get('data'):
-                    text_body = base64.urlsafe_b64decode(
-                        part['body']['data']
-                    ).decode('utf-8')
-                elif 'parts' in part:
-                    # Mensaje multipart anidado
-                    nested = self._extract_body(part)
-                    if nested:
-                        return nested
+                if content_type == "text/html" and html_body is None:
+                    html_body = text
+                elif content_type == "text/plain" and text_body is None:
+                    text_body = text
+        else:
+            try:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    charset = msg.get_content_charset() or "utf-8"
+                    text = payload.decode(charset, errors="replace")
+                    if msg.get_content_type() == "text/html":
+                        html_body = text
+                    else:
+                        text_body = text
+            except Exception:
+                pass
 
-            # Preferir HTML convertido a texto
-            if html_body:
-                body = self.h2t.handle(html_body)
-            elif text_body:
-                body = text_body
-
-        # Si el body es HTML, convertir
-        if body and '<html' in body.lower():
-            body = self.h2t.handle(body)
-
-        return body.strip()
+        if html_body:
+            return self.h2t.handle(html_body).strip()
+        if text_body:
+            return text_body.strip()
+        return ""
 
 
 def list_labels():
-    """Utilidad para listar todos los labels disponibles."""
+    """Utilidad para listar todos los labels/carpetas disponibles."""
     client = GmailClient().authenticate()
-    results = client.service.users().labels().list(userId='me').execute()
-    labels = results.get('labels', [])
+    status, folders = client.mail.list()
+
+    if status != "OK":
+        print("Error listando carpetas")
+        return
 
     print("\nLabels disponibles en tu Gmail:\n")
-    for label in sorted(labels, key=lambda x: x['name']):
-        print(f"  - {label['name']}")
+    for folder in sorted(folders):
+        # El formato es: b'(\\flags) "/" "nombre"'
+        parts = folder.decode().split(' "/" ')
+        if len(parts) == 2:
+            name = parts[1].strip('"')
+            print(f"  - {name}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     list_labels()
